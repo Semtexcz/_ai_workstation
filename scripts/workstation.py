@@ -19,6 +19,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANAGED_MARKER = "Managed by _ai_workstation"
 TIERS = ("frontier", "strong", "cheap")
+HARNESSES = ("codex", "cline")
 ROLE_TIERS = {
     "planner": "frontier",
     "analyst": "strong",
@@ -41,10 +42,12 @@ class WorkstationError(Exception):
 class CheckResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    passes: list[str] = field(default_factory=list)
 
     def extend(self, other: "CheckResult") -> None:
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
+        self.passes.extend(other.passes)
 
 
 def home() -> Path:
@@ -208,9 +211,28 @@ def tier_is_configured(tier: dict[str, Any]) -> bool:
     return tier.get("configured") is True and bool(tier.get("model"))
 
 
-def all_tiers_configured(config: dict[str, Any]) -> bool:
+def tier_impl(config: dict[str, Any], tier_name: str, harness: str) -> dict[str, Any] | None:
     tiers = config.get("tiers", {})
-    return isinstance(tiers, dict) and all(isinstance(tiers.get(tier), dict) and tier_is_configured(tiers[tier]) for tier in TIERS)
+    if not isinstance(tiers, dict):
+        return None
+    tier = tiers.get(tier_name)
+    if not isinstance(tier, dict):
+        return None
+    impl = tier.get(harness)
+    return impl if isinstance(impl, dict) else None
+
+
+def harness_tier_is_configured(config: dict[str, Any], tier_name: str, harness: str) -> bool:
+    impl = tier_impl(config, tier_name, harness)
+    return impl is not None and tier_is_configured(impl)
+
+
+def any_harness_tier_configured(config: dict[str, Any], harness: str) -> bool:
+    return any(harness_tier_is_configured(config, tier, harness) for tier in TIERS)
+
+
+def all_harness_tiers_configured(config: dict[str, Any], harness: str) -> bool:
+    return all(harness_tier_is_configured(config, tier, harness) for tier in TIERS)
 
 
 def codex_provider_id(tier: dict[str, Any]) -> str:
@@ -262,8 +284,46 @@ def obvious_secret_errors(path: Path, label: str) -> list[str]:
     return errors
 
 
+def validate_harness_impl(tier_name: str, harness: str, impl: dict[str, Any], *, local: bool) -> CheckResult:
+    result = CheckResult()
+    label = f"{harness} tier '{tier_name}'"
+    if "configured" in impl and not isinstance(impl["configured"], bool):
+        result.errors.append(f"{label}.configured must be boolean")
+    configured = tier_is_configured(impl)
+    if not configured:
+        result.warnings.append(f"{harness.capitalize()} tier '{tier_name}' is UNCONFIGURED")
+        return result
+    result.passes.append(f"{harness.capitalize()} tier '{tier_name}'")
+    if not local:
+        result.warnings.append(f"{label} is configured in example config; prefer local config")
+    for key in ("provider", "model", "reasoning_effort"):
+        if not isinstance(impl.get(key), str) or not impl[key]:
+            result.errors.append(f"{label}.{key} must be a non-empty string when configured")
+    effort = impl.get("reasoning_effort")
+    if isinstance(effort, str) and effort not in REASONING:
+        result.errors.append(f"{label}.reasoning_effort must be one of {sorted(REASONING)}")
+    if harness == "codex":
+        provider = impl.get("provider")
+        if provider == "openai":
+            return result
+        provider_id = impl.get("codex_provider_id") or provider
+        if provider_id in BUILTIN_CODEX_PROVIDERS:
+            result.errors.append(f"{label}.codex_provider_id must not use reserved provider id {provider_id!r}")
+        for key in ("base_url", "env_key"):
+            if not isinstance(impl.get(key), str) or not impl[key]:
+                result.errors.append(f"{label}.{key} must be a non-empty string for custom providers")
+        env_key = impl.get("env_key", "")
+        if isinstance(env_key, str) and env_key and not re.fullmatch(r"[A-Z][A-Z0-9_]*", env_key):
+            result.errors.append(f"{label}.env_key must name an environment variable, not a literal secret")
+    return result
+
+
 def validate_model_config(config: dict[str, Any], *, local: bool) -> CheckResult:
     result = CheckResult()
+    version = config.get("version")
+    if version != 2:
+        result.errors.append(f"model config version must be 2; found {version!r}. Copy config/models.example.json and migrate tiers.<tier> to tiers.<tier>.codex/cline.")
+        return result
     tiers = config.get("tiers")
     if not isinstance(tiers, dict):
         result.errors.append("model config must contain a tiers object")
@@ -273,35 +333,12 @@ def validate_model_config(config: dict[str, Any], *, local: bool) -> CheckResult
         if not isinstance(entry, dict):
             result.errors.append(f"missing model tier: {tier_name}")
             continue
-        if "configured" in entry and not isinstance(entry["configured"], bool):
-            result.errors.append(f"{tier_name}.configured must be boolean")
-        configured = tier_is_configured(entry)
-        for key in ("provider", "reasoning_effort"):
-            if not isinstance(entry.get(key), str) or not entry[key]:
-                result.errors.append(f"{tier_name}.{key} must be a non-empty string")
-        effort = entry.get("reasoning_effort")
-        if isinstance(effort, str) and effort not in REASONING:
-            result.errors.append(f"{tier_name}.reasoning_effort must be one of {sorted(REASONING)}")
-        if not configured:
-            result.warnings.append(f"model tier {tier_name} is UNCONFIGURED")
-            continue
-        if not local:
-            result.warnings.append(f"model tier {tier_name} is configured in example config; prefer local config")
-        model = entry.get("model")
-        if not isinstance(model, str) or not model:
-            result.errors.append(f"{tier_name}.model must be a non-empty string when configured")
-        provider = entry.get("provider")
-        if provider == "openai":
-            continue
-        provider_id = entry.get("codex_provider_id") or provider
-        if provider_id in BUILTIN_CODEX_PROVIDERS:
-            result.errors.append(f"{tier_name}.codex_provider_id must not use reserved provider id {provider_id!r}")
-        for key in ("base_url", "env_key"):
-            if not isinstance(entry.get(key), str) or not entry[key]:
-                result.errors.append(f"{tier_name}.{key} must be a non-empty string for custom providers")
-        env_key = entry.get("env_key", "")
-        if isinstance(env_key, str) and env_key and not re.fullmatch(r"[A-Z][A-Z0-9_]*", env_key):
-            result.errors.append(f"{tier_name}.env_key must name an environment variable, not a literal secret")
+        for harness in HARNESSES:
+            impl = entry.get(harness)
+            if not isinstance(impl, dict):
+                result.errors.append(f"{tier_name}.{harness} must be an object")
+                continue
+            result.extend(validate_harness_impl(tier_name, harness, impl, local=local))
     return result
 
 
@@ -312,7 +349,7 @@ def skill_dirs() -> list[Path]:
 
 def validate_skills() -> CheckResult:
     result = CheckResult()
-    expected = {"research", "source-validation", "planning", "task-review"}
+    expected = {"generic-research", "generic-source-validation", "generic-planning", "generic-task-review"}
     found = {path.name for path in skill_dirs()}
     if found != expected:
         result.errors.append(f"skills must be exactly {sorted(expected)}, found {sorted(found)}")
@@ -322,6 +359,8 @@ def validate_skills() -> CheckResult:
             result.errors.append(f"missing {skill}")
             continue
         text = skill.read_text(encoding="utf-8")
+        if f"name: {path.name}" not in text:
+            result.errors.append(f"{skill} name must match directory {path.name}")
         for token in ("description:", "## Trigger", "## Boundaries", "## Escalate"):
             if token not in text:
                 result.errors.append(f"{skill} missing {token}")
@@ -407,12 +446,12 @@ def validate_generated_codex() -> CheckResult:
     if model_check.errors:
         result.errors.extend(model_check.errors)
         return result
-    if not all_tiers_configured(config):
-        result.warnings.append("Codex model profiles are not generated until model tiers are configured")
-        return result
     for tier_name in TIERS:
+        impl = tier_impl(config, tier_name, "codex")
+        if not isinstance(impl, dict) or not tier_is_configured(impl):
+            continue
         try:
-            rendered = render_codex_profile(tier_name, config["tiers"][tier_name])
+            rendered = render_codex_profile(tier_name, impl)
             parsed = tomllib.loads(rendered)
         except (WorkstationError, tomllib.TOMLDecodeError) as exc:
             result.errors.append(f"invalid Codex TOML for {tier_name}: {exc}")
@@ -436,9 +475,15 @@ def validate_links() -> CheckResult:
 def validate_installation_state() -> CheckResult:
     result = CheckResult()
     result.extend(validate_links())
+    canonical_agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    for path in (home() / ".codex" / "AGENTS.md", home() / ".agents" / "AGENTS.md"):
+        if path.exists() and is_managed_file(path) and canonical_agents not in path.read_text(encoding="utf-8"):
+            result.errors.append(f"installed global instructions are stale: {path}")
     models = models_config()
-    if all_tiers_configured(models):
-        for name in (*TIERS, *ROLE_TIERS.keys()):
+    if any_harness_tier_configured(models, "codex"):
+        expected_profiles = [tier for tier in TIERS if harness_tier_is_configured(models, tier, "codex")]
+        expected_profiles.extend(role for role, tier in ROLE_TIERS.items() if harness_tier_is_configured(models, tier, "codex"))
+        for name in expected_profiles:
             path = home() / ".codex" / f"{name}.config.toml"
             if path.exists() and is_managed_file(path):
                 try:
@@ -458,9 +503,11 @@ def model_tier_status_lines() -> list[str]:
     lines = ["Model tiers:"]
     tiers = config.get("tiers", {})
     for tier in TIERS:
-        entry = tiers.get(tier, {}) if isinstance(tiers, dict) else {}
-        status = "configured" if isinstance(entry, dict) and tier_is_configured(entry) else "UNCONFIGURED"
-        lines.append(f"{tier}: {status}")
+        lines.append(tier)
+        for harness in HARNESSES:
+            entry = tier_impl(config, tier, harness)
+            status = "configured" if isinstance(entry, dict) and tier_is_configured(entry) else "UNCONFIGURED"
+            lines.append(f"  {harness.capitalize()}: {status}")
     return lines
 
 
@@ -472,7 +519,9 @@ def install() -> list[str]:
     models = models_config()
     actions: list[str] = []
 
-    write_managed(home() / ".codex" / "AGENTS.md", (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8"), "AGENTS.md", actions)
+    agent_contract = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    write_managed(home() / ".codex" / "AGENTS.md", agent_contract, "AGENTS.md", actions)
+    write_managed(home() / ".agents" / "AGENTS.md", agent_contract, "AGENTS.md", actions)
     for skill in skill_dirs():
         link_managed_dir(skill, home() / ".agents" / "skills" / skill.name, actions)
         link_managed_dir(skill, home() / ".cline" / "skills" / skill.name, actions)
@@ -481,27 +530,34 @@ def install() -> list[str]:
     write_managed(launcher, f'#!/usr/bin/env sh\nexec "{REPO_ROOT / "scripts" / "workstation.py"}" cline "$@"\n', "scripts/workstation.py", actions)
     launcher.chmod(0o755)
 
-    tiers = models["tiers"]
-    if all_tiers_configured(models):
+    if any_harness_tier_configured(models, "codex"):
         for tier_name in TIERS:
+            impl = tier_impl(models, tier_name, "codex")
+            if not isinstance(impl, dict) or not tier_is_configured(impl):
+                actions.append(f"Codex tier '{tier_name}' UNCONFIGURED; skipped profile")
+                continue
             write_managed(
                 home() / ".codex" / f"{tier_name}.config.toml",
-                render_codex_profile(tier_name, tiers[tier_name]),
+                render_codex_profile(tier_name, impl),
                 f"config/{models_path().name}:{tier_name}",
                 actions,
             )
         for role, tier_name in config["roles"].items():
+            impl = tier_impl(models, tier_name, "codex")
+            if not isinstance(impl, dict) or not tier_is_configured(impl):
+                actions.append(f"Codex role '{role}' skipped because tier '{tier_name}' is UNCONFIGURED")
+                continue
             write_managed(
                 home() / ".codex" / f"{role}.config.toml",
-                render_codex_profile(tier_name, tiers[tier_name]) + f"# Logical role: {role}\n",
+                render_codex_profile(tier_name, impl) + f"# Logical role: {role}\n",
                 f"config/{models_path().name}:{role}",
                 actions,
             )
     else:
-        actions.append("model tiers UNCONFIGURED; skipped Codex model profiles")
+        actions.append("all Codex tiers UNCONFIGURED; skipped Codex model profiles")
 
     cline_dir = home() / ".cline" / "ai-workstation"
-    write_managed(cline_dir / "model-tiers.json", render_json(tiers), f"config/{models_path().name}", actions)
+    write_managed(cline_dir / "model-tiers.json", render_json(models["tiers"]), f"config/{models_path().name}", actions)
     write_managed(cline_dir / "roles.json", render_json(config["roles"]), "config/workstation.json", actions)
     return actions
 
@@ -510,6 +566,7 @@ def uninstall() -> list[str]:
     actions: list[str] = []
     targets = [
         home() / ".codex" / "AGENTS.md",
+        home() / ".agents" / "AGENTS.md",
         home() / ".cline" / "ai-workstation" / "model-tiers.json",
         home() / ".cline" / "ai-workstation" / "roles.json",
         home() / ".local" / "bin" / "ai-cline",
@@ -527,7 +584,7 @@ def status() -> list[str]:
     skills_count = sum(1 for path in skills_dir.glob("*") if path.exists()) if skills_dir.exists() else 0
     lines = [
         f"Codex: {'installed' if (home() / '.codex' / 'AGENTS.md').exists() else 'missing'}",
-        f"Cline: {'installed' if (home() / '.cline' / 'ai-workstation').exists() else 'missing'}",
+        f"Cline: {'installed' if (home() / '.agents' / 'AGENTS.md').exists() and (home() / '.cline' / 'ai-workstation').exists() else 'missing'}",
         f"Skills: {skills_count} installed",
     ]
     lines.extend(model_tier_status_lines())
@@ -536,10 +593,9 @@ def status() -> list[str]:
 
 def build_cline_command(tier_name: str, extra_args: list[str]) -> list[str]:
     config = models_config()
-    tiers = config.get("tiers", {})
-    tier = tiers.get(tier_name) if isinstance(tiers, dict) else None
+    tier = tier_impl(config, tier_name, "cline")
     if not isinstance(tier, dict) or not tier_is_configured(tier):
-        raise WorkstationError(f"model tier {tier_name!r} is UNCONFIGURED; create config/models.local.json")
+        raise WorkstationError(f"Cline implementation of tier {tier_name!r} is UNCONFIGURED")
     command = ["cline", "--provider", tier["provider"], "--model", tier["model"], "--thinking", tier["reasoning_effort"]]
     command.extend(extra_args)
     return command
@@ -563,6 +619,8 @@ def format_validation(result: CheckResult) -> list[str]:
     lines = ["PASS repository" if not result.errors else "FAIL repository"]
     if not result.errors:
         lines.extend(["PASS skills", "PASS Codex adapter", "PASS Cline adapter", "PASS no tracked secrets detected"])
+    for passed in result.passes:
+        lines.append(f"PASS {passed}")
     for warning in result.warnings:
         lines.append(f"WARN {warning}")
     for error in result.errors:
@@ -587,7 +645,9 @@ def main(argv: list[str] | None = None) -> int:
             print("global skills installed")
             print("Codex adapter configured")
             print("Cline adapter configured")
-            print("model tiers configured" if all_tiers_configured(models_config()) else "model tiers UNCONFIGURED")
+            models = models_config()
+            print("Codex tiers configured" if all_harness_tiers_configured(models, "codex") else "Codex tiers partially configured or UNCONFIGURED")
+            print("Cline tiers configured" if all_harness_tiers_configured(models, "cline") else "Cline tiers partially configured or UNCONFIGURED")
             print("no tracked credentials detected")
         elif args.command == "update":
             print_lines(install())

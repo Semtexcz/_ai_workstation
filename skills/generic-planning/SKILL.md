@@ -1,9 +1,9 @@
 ---
-name: planning
+name: generic-planning
 description: Use when a task needs sequencing, risk reduction, decomposition, or explicit tradeoff management.
 ---
 
-# Planning
+# Generic Planning
 
 ## Trigger
 

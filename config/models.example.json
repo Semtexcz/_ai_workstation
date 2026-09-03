@@ -1,26 +1,50 @@
 {
-  "version": 1,
+  "version": 2,
   "tiers": {
     "frontier": {
-      "configured": false,
-      "provider": "openai",
-      "model": "",
-      "reasoning_effort": "high",
-      "auth": "codex"
+      "codex": {
+        "configured": false,
+        "provider": "openai",
+        "model": "",
+        "reasoning_effort": "high",
+        "auth": "codex"
+      },
+      "cline": {
+        "configured": false,
+        "provider": "",
+        "model": "",
+        "reasoning_effort": "high"
+      }
     },
     "strong": {
-      "configured": false,
-      "provider": "openai",
-      "model": "",
-      "reasoning_effort": "medium",
-      "auth": "codex"
+      "codex": {
+        "configured": false,
+        "provider": "openai",
+        "model": "",
+        "reasoning_effort": "medium",
+        "auth": "codex"
+      },
+      "cline": {
+        "configured": false,
+        "provider": "",
+        "model": "",
+        "reasoning_effort": "medium"
+      }
     },
     "cheap": {
-      "configured": false,
-      "provider": "openai",
-      "model": "",
-      "reasoning_effort": "low",
-      "auth": "codex"
+      "codex": {
+        "configured": false,
+        "provider": "openai",
+        "model": "",
+        "reasoning_effort": "low",
+        "auth": "codex"
+      },
+      "cline": {
+        "configured": false,
+        "provider": "",
+        "model": "",
+        "reasoning_effort": "low"
+      }
     }
   }
 }

@@ -1,9 +1,9 @@
 ---
-name: task-review
+name: generic-task-review
 description: Use before closing work to check requested scope, evidence, validation, and unresolved risk.
 ---
 
-# Task Review
+# Generic Task Review
 
 ## Trigger
 

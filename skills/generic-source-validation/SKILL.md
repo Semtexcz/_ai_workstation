@@ -1,9 +1,9 @@
 ---
-name: source-validation
+name: generic-source-validation
 description: Use when a claim, reference, document, URL, dependency, or generated artifact needs reliability checks.
 ---
 
-# Source Validation
+# Generic Source Validation
 
 ## Trigger
 

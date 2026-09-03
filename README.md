@@ -2,19 +2,20 @@
 
 Portable, version-controlled configuration for a developer's AI-agent workstation.
 
-This repository provides cross-project capabilities for Codex, Cline, shared generic skills, logical model tiers, and small reusable utilities. It is intentionally not a project template.
-
 Core rule:
 
 > Workstation provides capabilities. Projects provide semantics.
 
+`_ai_workstation` provides cross-project capabilities for Codex, Cline, shared global instructions, namespaced generic skills, logical model tiers, and small reusable utilities. It is intentionally not a project template.
+
 ## What Belongs Here
 
 - Agent harness user-level configuration.
+- Shared global agent instructions.
 - Global, domain-neutral skills.
-- Logical model/provider tiers.
+- Logical model tiers and per-harness implementations.
 - Thin Codex and Cline adapters.
-- Install, update, status, uninstall, validation, and launcher utilities.
+- Install, update, status, uninstall, validation, launcher, and CI utilities.
 
 ## What Does Not Belong Here
 
@@ -22,6 +23,7 @@ Core rule:
 - Project-local `AGENTS.md` semantics.
 - Software-specific Definition of Done rules.
 - Project-specific routing requirements.
+- Project-specific skills.
 - Credentials, API keys, tokens, or private MCP secrets.
 
 Those belong in project repositories or the future `_ai_work_template`.
@@ -36,7 +38,7 @@ make status
 make validate
 ```
 
-Without local model configuration, install still sets up instructions, skills, Cline tier metadata, and `ai-cline`, but model tiers show as `UNCONFIGURED` and Codex model profiles are not generated.
+Without local model configuration, install still sets up global instructions, namespaced skills, Cline tier metadata, and `ai-cline`. Each Codex/Cline tier shows as `UNCONFIGURED` until configured locally.
 
 To configure concrete models:
 
@@ -46,18 +48,46 @@ cp config/models.example.json config/models.local.json
 
 Then edit `config/models.local.json`. It is ignored by Git.
 
+## Model Tiers
+
+Projects should refer only to capability tiers:
+
+- `frontier`: architecture, strategy, ambiguous problems, critical decisions.
+- `strong`: bounded complex analysis, synthesis, integration, review.
+- `cheap`: narrow execution, extraction, formatting, routine research.
+
+Logical tier semantics are shared. Concrete tier implementation is harness-specific.
+
+```text
+Project requests:
+
+cheap
+strong
+frontier
+
+Workstation resolves:
+
+             Codex              Cline
+cheap        model A            model D
+strong       model B            model E
+frontier     model C            model F
+```
+
+Codex and Cline may use different providers and models for the same tier. A tier implementation may be configured for one harness and unconfigured for the other.
+
 ## Codex And Cline
 
 Codex integration installs:
 
 - `~/.codex/AGENTS.md`
-- tier profiles such as `~/.codex/frontier.config.toml` when tiers are configured
-- role profiles such as `~/.codex/planner.config.toml` when tiers are configured
-- skills under `~/.agents/skills/`
+- tier profiles such as `~/.codex/frontier.config.toml` when `tiers.frontier.codex` is configured
+- role profiles such as `~/.codex/planner.config.toml` when the mapped Codex tier is configured
+- namespaced skills under `~/.agents/skills/`
 
 Cline integration installs:
 
-- skills under `~/.cline/skills/`
+- shared global instructions at `~/.agents/AGENTS.md`
+- namespaced skills under `~/.cline/skills/`
 - non-secret tier metadata under `~/.cline/ai-workstation/`
 - launcher `~/.local/bin/ai-cline`
 
@@ -65,7 +95,7 @@ Use Cline tiers:
 
 ```bash
 ai-cline cheap "extract these values"
-ai-cline strong "compare these alternatives"
+ai-cline strong "compare alternatives"
 ai-cline frontier "design the approach"
 ```
 
@@ -78,15 +108,16 @@ codex --profile planner
 
 No separate `ai-codex` wrapper is provided because Codex profiles already solve this cleanly.
 
-## Model Tiers
+## Global Skills
 
-Projects should refer to capability tiers, not concrete models:
+Global skill names use the `generic-` prefix:
 
-- `frontier`: architecture, strategy, ambiguous problems, critical decisions.
-- `strong`: bounded complex analysis, synthesis, integration, review.
-- `cheap`: narrow execution, extraction, formatting, routine research.
+- `generic-planning`
+- `generic-research`
+- `generic-source-validation`
+- `generic-task-review`
 
-Concrete providers and model IDs are workstation configuration. Changing them does not require touching project repositories.
+This leaves project templates free to define project-specific `planning`, `research`, `source-validation`, or `task-review` skills without relying on harness-specific precedence behavior.
 
 ## Security Model
 

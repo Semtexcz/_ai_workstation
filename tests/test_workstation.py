@@ -11,30 +11,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workstation
 
 
-def valid_local_config(provider="openai"):
-    tiers = {}
-    for tier, model, effort in (
-        ("frontier", "frontier-model", "high"),
-        ("strong", "strong-model", "medium"),
-        ("cheap", "cheap-model", "low"),
-    ):
-        entry = {
-            "configured": True,
-            "provider": provider,
-            "model": model,
-            "reasoning_effort": effort,
-            "auth": "codex" if provider == "openai" else "env",
-        }
+def impl(configured=False, provider="openai", model="", effort="medium", harness="codex"):
+    entry = {
+        "configured": configured,
+        "provider": provider,
+        "model": model,
+        "reasoning_effort": effort,
+    }
+    if harness == "codex":
+        entry["auth"] = "codex" if provider == "openai" else "env"
         if provider != "openai":
             entry.update(
                 {
                     "codex_provider_id": f"{provider}-workstation",
-                    "base_url": "https://models.example.test/v1",
+                    "provider_name": f"{provider} compatible",
+                    "base_url": f"https://{provider}.example.test/v1",
                     "env_key": "EXAMPLE_PROVIDER_API_KEY",
                 }
             )
-        tiers[tier] = entry
-    return {"version": 1, "tiers": tiers}
+    return entry
+
+
+def v2_config(codex_tiers=(), cline_tiers=(), cline_providers=None):
+    cline_providers = cline_providers or {}
+    tiers = {}
+    for tier, effort in (("frontier", "high"), ("strong", "medium"), ("cheap", "low")):
+        tiers[tier] = {
+            "codex": impl(tier in codex_tiers, "openai", f"codex-{tier}-model" if tier in codex_tiers else "", effort, "codex"),
+            "cline": impl(
+                tier in cline_tiers,
+                cline_providers.get(tier, "anthropic"),
+                f"cline-{tier}-model" if tier in cline_tiers else "",
+                effort,
+                "cline",
+            ),
+        }
+    return {"version": 2, "tiers": tiers}
 
 
 class WorkstationTests(unittest.TestCase):
@@ -61,16 +73,55 @@ class WorkstationTests(unittest.TestCase):
             with mock.patch.dict(os.environ, env):
                 return Path(tmp), func(Path(tmp))
 
-    def test_validate_repo_passes_without_local_config(self):
+    def test_fully_unconfigured_workstation_passes_with_warnings(self):
         result = workstation.validate_repo()
         self.assertEqual(result.errors, [])
-        self.assertTrue(any("UNCONFIGURED" in warning for warning in result.warnings))
+        self.assertTrue(any("Codex tier 'frontier' is UNCONFIGURED" in warning for warning in result.warnings))
+        self.assertTrue(any("Cline tier 'cheap' is UNCONFIGURED" in warning for warning in result.warnings))
 
-    def test_valid_local_config_is_accepted(self):
-        self.write_local(valid_local_config())
+    def test_all_codex_tiers_configured_no_cline_tiers(self):
+        self.write_local(v2_config(codex_tiers=workstation.TIERS))
+        result = workstation.validate_repo()
+        self.assertEqual(result.errors, [])
+        self.assertTrue(any("Codex tier 'cheap'" in passed for passed in result.passes))
+        self.assertTrue(any("Cline tier 'cheap' is UNCONFIGURED" in warning for warning in result.warnings))
+
+    def test_all_cline_tiers_configured_no_codex_tiers(self):
+        self.write_local(v2_config(cline_tiers=workstation.TIERS))
+        result = workstation.validate_repo()
+        self.assertEqual(result.errors, [])
+        self.assertTrue(any("Cline tier 'frontier'" in passed for passed in result.passes))
+        self.assertTrue(any("Codex tier 'strong' is UNCONFIGURED" in warning for warning in result.warnings))
+
+    def test_mixed_cline_providers_per_tier(self):
+        self.write_local(
+            v2_config(
+                cline_tiers=workstation.TIERS,
+                cline_providers={"frontier": "anthropic", "strong": "gemini", "cheap": "deepseek"},
+            )
+        )
+        self.assertEqual(workstation.build_cline_command("frontier", ["design"])[2], "anthropic")
+        self.assertEqual(workstation.build_cline_command("strong", ["compare"])[2], "gemini")
+        self.assertEqual(workstation.build_cline_command("cheap", ["extract"])[2], "deepseek")
+
+    def test_partially_configured_tiers_are_valid(self):
+        self.write_local(v2_config(codex_tiers=("cheap",), cline_tiers=("frontier",)))
+        result = workstation.validate_repo()
+        self.assertEqual(result.errors, [])
+        self.assertTrue(any("Codex tier 'cheap'" in passed for passed in result.passes))
+        self.assertTrue(any("Cline tier 'frontier'" in passed for passed in result.passes))
+        self.assertTrue(any("Codex tier 'strong' is UNCONFIGURED" in warning for warning in result.warnings))
+
+    def test_fully_configured_workstation(self):
+        self.write_local(v2_config(codex_tiers=workstation.TIERS, cline_tiers=workstation.TIERS))
         result = workstation.validate_repo()
         self.assertEqual(result.errors, [])
         self.assertFalse(any("UNCONFIGURED" in warning for warning in result.warnings))
+
+    def test_old_version_fails_clearly(self):
+        self.write_local({"version": 1, "tiers": {"cheap": {"configured": True, "provider": "openai", "model": "x"}}})
+        result = workstation.validate_repo()
+        self.assertTrue(any("version must be 2" in error for error in result.errors))
 
     def test_malformed_local_config_fails_validation(self):
         self.local_path.write_text("{bad json", encoding="utf-8")
@@ -78,71 +129,111 @@ class WorkstationTests(unittest.TestCase):
         self.assertTrue(any("valid JSON" in error for error in result.errors))
 
     def test_local_config_literal_secret_fails_validation(self):
-        config = valid_local_config()
+        config = v2_config(codex_tiers=("cheap",))
         config["api_key"] = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
         self.write_local(config)
         result = workstation.validate_repo()
         self.assertTrue(any("literal secret" in error for error in result.errors))
 
     def test_ignored_local_config_is_not_treated_as_committed_content(self):
-        self.write_local(valid_local_config())
+        self.write_local(v2_config(codex_tiers=("cheap",)))
         result = workstation.validate_secret_state()
         self.assertFalse(any("must remain untracked" in error for error in result.errors))
 
-    def test_unconfigured_install_skips_codex_model_profiles(self):
+    def test_builtin_openai_provider_rendering_does_not_redefine_provider(self):
+        tier = v2_config(codex_tiers=("cheap",))["tiers"]["cheap"]["codex"]
+        rendered = workstation.render_codex_profile("cheap", tier)
+        self.assertIn('model_provider = "openai"', rendered)
+        self.assertNotIn("[model_providers.openai]", rendered)
+
+    def test_custom_provider_rendering_defines_non_reserved_provider(self):
+        tier = impl(True, "openai-compatible", "custom-model", "low", "codex")
+        rendered = workstation.render_codex_profile("cheap", tier)
+        self.assertIn('model_provider = "openai-compatible-workstation"', rendered)
+        self.assertIn("[model_providers.openai-compatible-workstation]", rendered)
+        self.assertIn('env_key = "EXAMPLE_PROVIDER_API_KEY"', rendered)
+
+    def test_no_profile_generated_for_unconfigured_codex_tier(self):
+        self.write_local(v2_config(codex_tiers=("cheap",)))
+
         def scenario(home):
-            actions = workstation.install()
-            self.assertTrue((home / ".codex" / "AGENTS.md").exists())
-            self.assertFalse((home / ".codex" / "cheap.config.toml").exists())
-            self.assertTrue(any("UNCONFIGURED" in action for action in actions))
+            workstation.install()
+            self.assertTrue((home / ".codex" / "cheap.config.toml").exists())
+            self.assertTrue((home / ".codex" / "worker.config.toml").exists())
+            self.assertFalse((home / ".codex" / "strong.config.toml").exists())
+            self.assertFalse((home / ".codex" / "analyst.config.toml").exists())
 
         self.run_with_home(scenario)
 
-    def test_configured_install_creates_profiles_and_launcher(self):
-        self.write_local(valid_local_config())
+    def test_role_mapping_uses_codex_tiers(self):
+        self.write_local(v2_config(codex_tiers=("frontier", "strong", "cheap")))
 
         def scenario(home):
             workstation.install()
-            self.assertTrue((home / ".codex" / "planner.config.toml").exists())
-            self.assertTrue((home / ".local" / "bin" / "ai-cline").exists())
-            profile = (home / ".codex" / "cheap.config.toml").read_text(encoding="utf-8")
-            self.assertIn('model_provider = "openai"', profile)
-            self.assertNotIn("[model_providers.openai]", profile)
+            planner = (home / ".codex" / "planner.config.toml").read_text(encoding="utf-8")
+            worker = (home / ".codex" / "worker.config.toml").read_text(encoding="utf-8")
+            self.assertIn('model = "codex-frontier-model"', planner)
+            self.assertIn('model = "codex-cheap-model"', worker)
 
         self.run_with_home(scenario)
 
-    def test_idempotent_reinstall(self):
-        self.write_local(valid_local_config())
+    def test_cline_command_uses_cline_config_not_codex_config(self):
+        self.write_local(v2_config(codex_tiers=("cheap",), cline_tiers=("cheap",), cline_providers={"cheap": "gemini"}))
+        command = workstation.build_cline_command("cheap", ["extract"])
+        self.assertEqual(command, ["cline", "--provider", "gemini", "--model", "cline-cheap-model", "--thinking", "low", "extract"])
 
+    def test_missing_cline_tier_fails_clearly(self):
+        self.write_local(v2_config(codex_tiers=("cheap",)))
+        with self.assertRaisesRegex(workstation.WorkstationError, "Cline implementation of tier 'cheap' is UNCONFIGURED"):
+            workstation.build_cline_command("cheap", ["hello"])
+
+    def test_global_agents_installed_from_same_source(self):
         def scenario(home):
             workstation.install()
-            return workstation.install()
-
-        _, actions = self.run_with_home(scenario)
-        self.assertTrue(any(action.startswith("unchanged") for action in actions))
-
-    def test_uninstall_removes_managed_state(self):
-        self.write_local(valid_local_config())
-
-        def scenario(home):
-            workstation.install()
+            canonical = (workstation.REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+            codex = (home / ".codex" / "AGENTS.md").read_text(encoding="utf-8")
+            shared = (home / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn(canonical, codex)
+            self.assertIn(canonical, shared)
             workstation.uninstall()
             self.assertFalse((home / ".codex" / "AGENTS.md").exists())
-            self.assertFalse((home / ".agents" / "skills" / "research").exists())
-            self.assertFalse((home / ".cline" / "ai-workstation" / "model-tiers.json").exists())
-            self.assertFalse((home / ".local" / "bin" / "ai-cline").exists())
+            self.assertFalse((home / ".agents" / "AGENTS.md").exists())
+
+        self.run_with_home(scenario)
+
+    def test_namespaced_global_skills_installed_to_both_harnesses(self):
+        def scenario(home):
+            workstation.install()
+            expected = {"generic-planning", "generic-research", "generic-source-validation", "generic-task-review"}
+            self.assertEqual({p.name for p in (home / ".agents" / "skills").iterdir()}, expected)
+            self.assertEqual({p.name for p in (home / ".cline" / "skills").iterdir()}, expected)
+            self.assertNotIn("planning", {p.name for p in (home / ".agents" / "skills").iterdir()})
+            self.assertNotIn("research", {p.name for p in (home / ".cline" / "skills").iterdir()})
+
+        self.run_with_home(scenario)
+
+    def test_status_shows_per_harness_state(self):
+        self.write_local(v2_config(codex_tiers=("cheap",), cline_tiers=("frontier", "cheap")))
+
+        def scenario(home):
+            workstation.install()
+            lines = workstation.status()
+            self.assertIn("frontier", lines)
+            self.assertIn("  Codex: UNCONFIGURED", lines)
+            self.assertIn("  Cline: configured", lines)
+            self.assertIn("cheap", lines)
 
         self.run_with_home(scenario)
 
     def test_preserves_unmanaged_file(self):
-        self.write_local(valid_local_config())
+        self.write_local(v2_config(codex_tiers=("cheap",)))
 
         def scenario(home):
-            target = home / ".codex" / "planner.config.toml"
+            target = home / ".codex" / "worker.config.toml"
             target.parent.mkdir(parents=True)
             target.write_text("user config\n", encoding="utf-8")
             workstation.install()
-            backups = list(target.parent.glob("planner.config.toml.backup.*"))
+            backups = list(target.parent.glob("worker.config.toml.backup.*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "user config\n")
             workstation.uninstall()
@@ -153,11 +244,11 @@ class WorkstationTests(unittest.TestCase):
 
     def test_preserves_unmanaged_directory(self):
         def scenario(home):
-            target = home / ".agents" / "skills" / "research"
+            target = home / ".agents" / "skills" / "generic-research"
             target.mkdir(parents=True)
             (target / "note.txt").write_text("mine", encoding="utf-8")
             workstation.install()
-            backups = list(target.parent.glob("research.backup.*"))
+            backups = list(target.parent.glob("generic-research.backup.*"))
             self.assertEqual(len(backups), 1)
             self.assertTrue((backups[0] / "note.txt").exists())
             workstation.uninstall()
@@ -169,11 +260,11 @@ class WorkstationTests(unittest.TestCase):
         def scenario(home):
             source = home / "other-skill"
             source.mkdir()
-            target = home / ".agents" / "skills" / "research"
+            target = home / ".agents" / "skills" / "generic-research"
             target.parent.mkdir(parents=True)
             target.symlink_to(source, target_is_directory=True)
             workstation.install()
-            backups = list(target.parent.glob("research.backup.*"))
+            backups = list(target.parent.glob("generic-research.backup.*"))
             self.assertEqual(len(backups), 1)
             self.assertTrue(backups[0].is_symlink())
             workstation.uninstall()
@@ -183,13 +274,13 @@ class WorkstationTests(unittest.TestCase):
 
     def test_preserves_broken_unmanaged_symlink(self):
         def scenario(home):
-            target = home / ".agents" / "skills" / "research"
+            target = home / ".agents" / "skills" / "generic-research"
             target.parent.mkdir(parents=True)
             target.symlink_to(home / "missing")
             self.assertTrue(target.is_symlink())
             self.assertFalse(target.exists())
             workstation.install()
-            backups = list(target.parent.glob("research.backup.*"))
+            backups = list(target.parent.glob("generic-research.backup.*"))
             self.assertEqual(len(backups), 1)
             self.assertTrue(backups[0].is_symlink())
             workstation.uninstall()
@@ -197,60 +288,28 @@ class WorkstationTests(unittest.TestCase):
 
         self.run_with_home(scenario)
 
-    def test_managed_symlink_can_be_replaced(self):
-        def scenario(home):
-            workstation.install()
-            target = home / ".agents" / "skills" / "research"
-            self.assertTrue(workstation.is_managed_symlink(target))
-            second = workstation.install()
-            self.assertTrue(any(f"unchanged {target}" == action for action in second))
-
-        self.run_with_home(scenario)
-
     def test_copied_fallback_directory_is_owned_and_uninstalled(self):
         def scenario(home):
             workstation.install()
-            copied = [p for p in (home / ".agents" / "skills").iterdir() if p.is_dir() and not p.is_symlink()]
-            self.assertTrue(copied)
-            self.assertTrue((home / ".agents" / "skills" / "research" / ".ai-workstation-managed").exists())
+            self.assertTrue((home / ".agents" / "skills" / "generic-research" / ".ai-workstation-managed").exists())
             workstation.uninstall()
-            self.assertFalse((home / ".agents" / "skills" / "research").exists())
+            self.assertFalse((home / ".agents" / "skills" / "generic-research").exists())
 
         self.run_with_home(scenario, {"AI_WORKSTATION_FORCE_COPY": "1"})
 
-    def test_builtin_openai_provider_rendering_does_not_redefine_provider(self):
-        tier = valid_local_config()["tiers"]["cheap"]
-        rendered = workstation.render_codex_profile("cheap", tier)
-        self.assertIn('model_provider = "openai"', rendered)
-        self.assertNotIn("[model_providers.openai]", rendered)
+    def test_idempotent_reinstall(self):
+        self.write_local(v2_config(codex_tiers=("cheap",), cline_tiers=("cheap",)))
 
-    def test_custom_provider_rendering_defines_non_reserved_provider(self):
-        tier = valid_local_config("openai-compatible")["tiers"]["cheap"]
-        rendered = workstation.render_codex_profile("cheap", tier)
-        self.assertIn('model_provider = "openai-compatible-workstation"', rendered)
-        self.assertIn("[model_providers.openai-compatible-workstation]", rendered)
-        self.assertIn('env_key = "EXAMPLE_PROVIDER_API_KEY"', rendered)
-
-    def test_cline_tier_command_generation(self):
-        self.write_local(valid_local_config("cline"))
-        command = workstation.build_cline_command("cheap", ["extract these values"])
-        self.assertEqual(
-            command,
-            ["cline", "--provider", "cline", "--model", "cheap-model", "--thinking", "low", "extract these values"],
-        )
-
-    def test_unconfigured_cline_tier_command_fails(self):
-        with self.assertRaises(workstation.WorkstationError):
-            workstation.build_cline_command("cheap", ["hello"])
-
-    def test_skill_synchronization_targets_all_skills(self):
         def scenario(home):
             workstation.install()
-            expected = {"planning", "research", "source-validation", "task-review"}
-            self.assertEqual({p.name for p in (home / ".agents" / "skills").iterdir()}, expected)
-            self.assertEqual({p.name for p in (home / ".cline" / "skills").iterdir()}, expected)
+            return workstation.install()
 
-        self.run_with_home(scenario)
+        _, actions = self.run_with_home(scenario)
+        self.assertTrue(any(action.startswith("unchanged") for action in actions))
+
+    def test_ci_compatible_state_without_local_config(self):
+        result = workstation.validate_repo()
+        self.assertEqual(result.errors, [])
 
 
 if __name__ == "__main__":

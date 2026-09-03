@@ -1,9 +1,9 @@
 ---
-name: research
+name: generic-research
 description: Use when the task requires finding, comparing, or summarizing information from external or local sources.
 ---
 
-# Research
+# Generic Research
 
 ## Trigger
 
