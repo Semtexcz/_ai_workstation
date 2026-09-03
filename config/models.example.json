@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "tiers": {
+    "frontier": {
+      "configured": false,
+      "provider": "openai",
+      "model": "",
+      "reasoning_effort": "high",
+      "auth": "codex"
+    },
+    "strong": {
+      "configured": false,
+      "provider": "openai",
+      "model": "",
+      "reasoning_effort": "medium",
+      "auth": "codex"
+    },
+    "cheap": {
+      "configured": false,
+      "provider": "openai",
+      "model": "",
+      "reasoning_effort": "low",
+      "auth": "codex"
+    }
+  }
+}

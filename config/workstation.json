@@ -3,8 +3,8 @@
   "canonical": {
     "skills": "skills/",
     "global_agent_contract": "AGENTS.md",
-    "model_tiers_example": "config/models.example.yaml",
-    "local_model_tiers": "config/models.local.yaml"
+    "model_tiers_example": "config/models.example.json",
+    "local_model_tiers": "config/models.local.json"
   },
   "install": {
     "codex_home": "~/.codex",

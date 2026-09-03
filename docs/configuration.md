@@ -1,26 +1,40 @@
 # Configuration
 
+## File Format
+
+Configuration is JSON to keep the workstation dependency-free:
+
+- `config/workstation.json`
+- `config/models.example.json`
+- `config/models.local.json`
+
+`models.local.json` is ignored by Git.
+
 ## Model Tiers
 
 Copy the example file and customize it locally:
 
 ```bash
-cp config/models.example.yaml config/models.local.yaml
+cp config/models.example.json config/models.local.json
 ```
 
-`models.local.yaml` is JSON-compatible YAML so the repository can parse it with the Python standard library. Each tier has:
+Each tier has:
 
-- `provider`: provider identifier used by generated adapter files.
-- `model`: concrete model ID for this workstation.
+- `configured`: `true` only when the tier is runnable.
+- `provider`: provider identifier for Codex/Cline.
+- `model`: concrete model ID.
 - `reasoning_effort`: `minimal`, `low`, `medium`, `high`, or `xhigh`.
-- `env_key`: environment variable name containing the secret.
-- `base_url`: provider API base URL.
+- `auth`: documentation field such as `codex` or `env`.
 
-The required tiers are `frontier`, `strong`, and `cheap`.
+For custom providers, also set:
+
+- `codex_provider_id`: non-reserved Codex provider ID.
+- `base_url`: OpenAI-compatible API base URL.
+- `env_key`: environment variable name containing the API key.
 
 ## Codex
 
-Codex profile files are generated under `~/.codex`:
+When all tiers are configured, Codex profile files are generated under `~/.codex`:
 
 - `frontier.config.toml`
 - `strong.config.toml`
@@ -44,7 +58,13 @@ codex --profile planner
 codex --profile cheap "format this table"
 ```
 
-Project repositories should not hard-code model IDs. They may describe task impact or requested tier, and the workstation resolves concrete models.
+For `provider = "openai"`, the generated profile uses the built-in Codex OpenAI provider and does not redefine `[model_providers.openai]`.
+
+For custom providers, the generated profile includes `[model_providers.<codex_provider_id>]` and references credentials through `env_key`.
+
+## Authentication
+
+ChatGPT/Codex authentication is user-managed by Codex and is preserved. OpenAI API authentication is also user-managed by Codex or environment variables. Custom provider authentication uses `env_key` only; do not place secret values in JSON.
 
 ## Cline
 
@@ -55,7 +75,19 @@ Cline skills are installed under `~/.cline/skills`. Non-secret tier metadata is 
 ~/.cline/ai-workstation/roles.json
 ```
 
-Cline provider credentials and model selections remain local. Use Cline settings, Cline CLI flags, or future local wrappers to select the provider/model from the tier metadata. Different tiers may use different providers.
+The `ai-cline` launcher resolves a logical tier and invokes Cline using supported CLI flags:
+
+```bash
+ai-cline cheap "extract these values"
+ai-cline strong "compare these alternatives"
+ai-cline frontier "design the approach"
+```
+
+To inspect the command without running Cline:
+
+```bash
+ai-cline --print-command cheap "extract these values"
+```
 
 ## Commands
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and validate the portable AI workstation configuration."""
+"""Install, launch, and validate the portable AI workstation configuration."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,7 @@ ROLE_TIERS = {
     "reviewer": "strong",
 }
 REASONING = {"minimal", "low", "medium", "high", "xhigh"}
+BUILTIN_CODEX_PROVIDERS = {"openai", "ollama", "lmstudio"}
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"(?i)(api[_-]?key|access[_-]?token|secret)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{16,}"),
@@ -33,31 +37,53 @@ class WorkstationError(Exception):
     pass
 
 
+@dataclass
+class CheckResult:
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def extend(self, other: "CheckResult") -> None:
+        self.errors.extend(other.errors)
+        self.warnings.extend(other.warnings)
+
+
 def home() -> Path:
     return Path(os.environ.get("HOME", str(Path.home()))).expanduser()
 
 
-def load_json_yaml(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise WorkstationError(f"{path} must be JSON-compatible YAML: {exc}") from exc
+        raise WorkstationError(f"{path} must contain valid JSON: {exc}") from exc
     if not isinstance(data, dict):
-        raise WorkstationError(f"{path} must contain an object")
+        raise WorkstationError(f"{path} must contain a JSON object")
     return data
 
 
 def workstation_config() -> dict[str, Any]:
-    return load_json_yaml(REPO_ROOT / "config" / "workstation.yaml")
+    return load_json(REPO_ROOT / "config" / "workstation.json")
+
+
+def models_local_path() -> Path:
+    return REPO_ROOT / "config" / "models.local.json"
+
+
+def models_example_path() -> Path:
+    return REPO_ROOT / "config" / "models.example.json"
 
 
 def models_path() -> Path:
-    local = REPO_ROOT / "config" / "models.local.yaml"
-    return local if local.exists() else REPO_ROOT / "config" / "models.example.yaml"
+    local = models_local_path()
+    return local if local.exists() else models_example_path()
 
 
 def models_config() -> dict[str, Any]:
-    return load_json_yaml(models_path())
+    return load_json(models_path())
+
+
+def using_local_models() -> bool:
+    return models_local_path().exists()
 
 
 def managed_header(source: str) -> str:
@@ -66,7 +92,27 @@ def managed_header(source: str) -> str:
 
 def backup_path(path: Path) -> Path:
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return path.with_name(f"{path.name}.backup.{stamp}")
+    candidate = path.with_name(f"{path.name}.backup.{stamp}")
+    suffix = 1
+    while candidate.exists() or candidate.is_symlink():
+        candidate = path.with_name(f"{path.name}.backup.{stamp}.{suffix}")
+        suffix += 1
+    return candidate
+
+
+def resolved_symlink_target(path: Path) -> Path | None:
+    if not path.is_symlink():
+        return None
+    raw = Path(os.readlink(path))
+    if not raw.is_absolute():
+        raw = path.parent / raw
+    return raw.resolve(strict=False)
+
+
+def path_is_under_repo(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    repo = REPO_ROOT.resolve(strict=False)
+    return resolved == repo or repo in resolved.parents
 
 
 def is_managed_file(path: Path) -> bool:
@@ -79,22 +125,33 @@ def is_managed_file(path: Path) -> bool:
 
 
 def is_managed_symlink(path: Path) -> bool:
-    if not path.is_symlink():
-        return False
-    try:
-        return REPO_ROOT in path.resolve().parents or path.resolve() == REPO_ROOT
-    except FileNotFoundError:
-        return False
+    target = resolved_symlink_target(path)
+    return target is not None and path_is_under_repo(target)
+
+
+def is_managed_copied_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink() and (path / ".ai-workstation-managed").exists()
 
 
 def prepare_target(path: Path, actions: list[str]) -> None:
     if path.is_symlink():
-        path.unlink()
-        actions.append(f"replaced managed symlink {path}")
-    elif path.exists() and is_managed_file(path):
+        if is_managed_symlink(path):
+            path.unlink()
+            actions.append(f"replaced managed symlink {path}")
+            return
+        backup = backup_path(path)
+        path.rename(backup)
+        actions.append(f"preserved unmanaged symlink {path} as {backup}")
+        return
+    if path.exists() and is_managed_file(path):
         path.unlink()
         actions.append(f"replaced managed file {path}")
-    elif path.exists():
+        return
+    if path.exists() and is_managed_copied_dir(path):
+        shutil.rmtree(path)
+        actions.append(f"replaced managed directory {path}")
+        return
+    if path.exists():
         backup = backup_path(path)
         path.rename(backup)
         actions.append(f"preserved unmanaged {path} as {backup}")
@@ -103,7 +160,7 @@ def prepare_target(path: Path, actions: list[str]) -> None:
 def write_managed(path: Path, body: str, source: str, actions: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = managed_header(source) + body
-    if path.exists() and not path.is_symlink() and path.read_text(encoding="utf-8") == content:
+    if path.exists() and not path.is_symlink() and path.is_file() and path.read_text(encoding="utf-8") == content:
         actions.append(f"unchanged {path}")
         return
     prepare_target(path, actions)
@@ -113,62 +170,139 @@ def write_managed(path: Path, body: str, source: str, actions: list[str]) -> Non
 
 def link_managed_dir(source: Path, target: Path, actions: list[str]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink() and target.resolve() == source.resolve():
+    if target.is_symlink() and resolved_symlink_target(target) == source.resolve(strict=False):
         actions.append(f"unchanged {target}")
         return
     prepare_target(target, actions)
+    if os.environ.get("AI_WORKSTATION_FORCE_COPY") == "1":
+        shutil.copytree(source, target)
+        (target / ".ai-workstation-managed").write_text(str(source), encoding="utf-8")
+        actions.append(f"copied {source} to {target}")
+        return
     try:
         target.symlink_to(source, target_is_directory=True)
         actions.append(f"linked {target} -> {source}")
     except OSError:
         shutil.copytree(source, target)
-        marker = target / ".ai-workstation-managed"
-        marker.write_text(str(source), encoding="utf-8")
+        (target / ".ai-workstation-managed").write_text(str(source), encoding="utf-8")
         actions.append(f"copied {source} to {target}")
 
 
-def render_codex_profile(tier_name: str, tier: dict[str, Any]) -> str:
+def remove_owned(target: Path, actions: list[str]) -> None:
+    if not target.exists() and not target.is_symlink():
+        return
+    if target.is_symlink() and is_managed_symlink(target):
+        target.unlink()
+        actions.append(f"removed {target}")
+    elif is_managed_file(target):
+        target.unlink()
+        actions.append(f"removed {target}")
+    elif is_managed_copied_dir(target):
+        shutil.rmtree(target)
+        actions.append(f"removed {target}")
+    else:
+        actions.append(f"left unmanaged {target}")
+
+
+def tier_is_configured(tier: dict[str, Any]) -> bool:
+    return tier.get("configured") is True and bool(tier.get("model"))
+
+
+def all_tiers_configured(config: dict[str, Any]) -> bool:
+    tiers = config.get("tiers", {})
+    return isinstance(tiers, dict) and all(isinstance(tiers.get(tier), dict) and tier_is_configured(tiers[tier]) for tier in TIERS)
+
+
+def codex_provider_id(tier: dict[str, Any]) -> str:
     provider = tier["provider"]
+    if provider == "openai":
+        return "openai"
+    custom_id = tier.get("codex_provider_id") or provider
+    if custom_id in BUILTIN_CODEX_PROVIDERS:
+        raise WorkstationError(f"custom Codex provider id {custom_id!r} is reserved")
+    return custom_id
+
+
+def render_codex_profile(tier_name: str, tier: dict[str, Any]) -> str:
+    provider_id = codex_provider_id(tier)
     lines = [
         f'model = "{tier["model"]}"',
-        f'model_provider = "{provider}"',
+        f'model_provider = "{provider_id}"',
         f'model_reasoning_effort = "{tier["reasoning_effort"]}"',
         "",
-        f"[model_providers.{provider}]",
-        f'name = "{provider}"',
-        f'base_url = "{tier["base_url"]}"',
-        f'env_key = "{tier["env_key"]}"',
-        'wire_api = "responses"',
-        "",
-        f"# Logical tier: {tier_name}",
     ]
-    return "\n".join(lines) + "\n"
+    if provider_id != "openai":
+        lines.extend(
+            [
+                f"[model_providers.{provider_id}]",
+                f'name = "{tier.get("provider_name", provider_id)}"',
+                f'base_url = "{tier["base_url"]}"',
+                f'env_key = "{tier["env_key"]}"',
+                'wire_api = "responses"',
+                "",
+            ]
+        )
+    lines.append(f"# Logical tier: {tier_name}")
+    rendered = "\n".join(lines) + "\n"
+    tomllib.loads(rendered)
+    return rendered
 
 
 def render_json(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
 
 
-def validate_model_config(config: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
+def obvious_secret_errors(path: Path, label: str) -> list[str]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    errors = []
+    for pattern in SECRET_PATTERNS:
+        if pattern.search(text):
+            errors.append(f"possible literal secret in {label}")
+            break
+    return errors
+
+
+def validate_model_config(config: dict[str, Any], *, local: bool) -> CheckResult:
+    result = CheckResult()
     tiers = config.get("tiers")
     if not isinstance(tiers, dict):
-        return ["model config must contain a tiers object"]
-    for tier in TIERS:
-        entry = tiers.get(tier)
+        result.errors.append("model config must contain a tiers object")
+        return result
+    for tier_name in TIERS:
+        entry = tiers.get(tier_name)
         if not isinstance(entry, dict):
-            errors.append(f"missing model tier: {tier}")
+            result.errors.append(f"missing model tier: {tier_name}")
             continue
-        for key in ("provider", "model", "reasoning_effort", "env_key", "base_url"):
+        if "configured" in entry and not isinstance(entry["configured"], bool):
+            result.errors.append(f"{tier_name}.configured must be boolean")
+        configured = tier_is_configured(entry)
+        for key in ("provider", "reasoning_effort"):
             if not isinstance(entry.get(key), str) or not entry[key]:
-                errors.append(f"{tier}.{key} must be a non-empty string")
+                result.errors.append(f"{tier_name}.{key} must be a non-empty string")
         effort = entry.get("reasoning_effort")
         if isinstance(effort, str) and effort not in REASONING:
-            errors.append(f"{tier}.reasoning_effort must be one of {sorted(REASONING)}")
+            result.errors.append(f"{tier_name}.reasoning_effort must be one of {sorted(REASONING)}")
+        if not configured:
+            result.warnings.append(f"model tier {tier_name} is UNCONFIGURED")
+            continue
+        if not local:
+            result.warnings.append(f"model tier {tier_name} is configured in example config; prefer local config")
+        model = entry.get("model")
+        if not isinstance(model, str) or not model:
+            result.errors.append(f"{tier_name}.model must be a non-empty string when configured")
+        provider = entry.get("provider")
+        if provider == "openai":
+            continue
+        provider_id = entry.get("codex_provider_id") or provider
+        if provider_id in BUILTIN_CODEX_PROVIDERS:
+            result.errors.append(f"{tier_name}.codex_provider_id must not use reserved provider id {provider_id!r}")
+        for key in ("base_url", "env_key"):
+            if not isinstance(entry.get(key), str) or not entry[key]:
+                result.errors.append(f"{tier_name}.{key} must be a non-empty string for custom providers")
         env_key = entry.get("env_key", "")
-        if isinstance(env_key, str) and not re.fullmatch(r"[A-Z][A-Z0-9_]*", env_key):
-            errors.append(f"{tier}.env_key must name an environment variable, not a literal secret")
-    return errors
+        if isinstance(env_key, str) and env_key and not re.fullmatch(r"[A-Z][A-Z0-9_]*", env_key):
+            result.errors.append(f"{tier_name}.env_key must name an environment variable, not a literal secret")
+    return result
 
 
 def skill_dirs() -> list[Path]:
@@ -176,48 +310,61 @@ def skill_dirs() -> list[Path]:
     return sorted(path for path in root.iterdir() if path.is_dir())
 
 
-def validate_skills() -> list[str]:
-    errors: list[str] = []
+def validate_skills() -> CheckResult:
+    result = CheckResult()
     expected = {"research", "source-validation", "planning", "task-review"}
     found = {path.name for path in skill_dirs()}
     if found != expected:
-        errors.append(f"skills must be exactly {sorted(expected)}, found {sorted(found)}")
+        result.errors.append(f"skills must be exactly {sorted(expected)}, found {sorted(found)}")
     for path in skill_dirs():
         skill = path / "SKILL.md"
         if not skill.exists():
-            errors.append(f"missing {skill}")
+            result.errors.append(f"missing {skill}")
             continue
         text = skill.read_text(encoding="utf-8")
         for token in ("description:", "## Trigger", "## Boundaries", "## Escalate"):
             if token not in text:
-                errors.append(f"{skill} missing {token}")
-    return errors
+                result.errors.append(f"{skill} missing {token}")
+    return result
 
 
-def scan_for_secrets() -> list[str]:
-    errors: list[str] = []
-    for path in REPO_ROOT.rglob("*"):
-        if not path.is_file() or ".git" in path.parts:
-            continue
-        if path.name == "models.local.yaml":
-            errors.append("config/models.local.yaml must not be committed or kept as canonical repo config")
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for pattern in SECRET_PATTERNS:
-            if pattern.search(text):
-                errors.append(f"possible secret in {path.relative_to(REPO_ROOT)}")
-                break
-    return errors
+def tracked_files() -> list[Path]:
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return [path.relative_to(REPO_ROOT) for path in REPO_ROOT.rglob("*") if path.is_file() and ".git" not in path.parts]
+    return [Path(item.decode()) for item in proc.stdout.split(b"\0") if item]
 
 
-def validate_repo() -> list[str]:
-    errors: list[str] = []
+def validate_secret_state() -> CheckResult:
+    result = CheckResult()
+    for rel in tracked_files():
+        if rel.parent.as_posix() == "config" and rel.name.startswith("models.local."):
+            result.errors.append(f"{rel.as_posix()} must remain untracked")
+        path = REPO_ROOT / rel
+        if path.is_file():
+            result.errors.extend(obvious_secret_errors(path, rel.as_posix()))
+    local = models_local_path()
+    if local.exists():
+        result.errors.extend(obvious_secret_errors(local, "local model config"))
+    return result
+
+
+def validate_repo() -> CheckResult:
+    result = CheckResult()
     required = [
         "README.md",
         "AGENTS.md",
         "Makefile",
         ".gitignore",
-        "config/models.example.yaml",
-        "config/workstation.yaml",
+        "config/models.example.json",
+        "config/workstation.json",
         "adapters/codex/README.md",
         "adapters/cline/README.md",
         "docs/architecture.md",
@@ -228,43 +375,99 @@ def validate_repo() -> list[str]:
     ]
     for rel in required:
         if not (REPO_ROOT / rel).exists():
-            errors.append(f"missing {rel}")
-    for rel in ("config/models.example.yaml", "config/workstation.yaml"):
+            result.errors.append(f"missing {rel}")
+    for rel in ("config/models.example.json", "config/workstation.json"):
         try:
-            load_json_yaml(REPO_ROOT / rel)
+            load_json(REPO_ROOT / rel)
         except WorkstationError as exc:
-            errors.append(str(exc))
+            result.errors.append(str(exc))
     try:
-        errors.extend(validate_model_config(models_config()))
+        result.extend(validate_model_config(models_config(), local=using_local_models()))
     except WorkstationError as exc:
-        errors.append(str(exc))
-    errors.extend(validate_skills())
-    errors.extend(scan_for_secrets())
-    unfinished_marker = "TO" + "DO"
-    if unfinished_marker in "\n".join(
-        path.read_text(encoding="utf-8", errors="ignore")
-        for path in REPO_ROOT.rglob("*")
-        if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts
-    ):
-        errors.append("unfinished placeholders remain")
-    return errors
+        result.errors.append(str(exc))
+    result.extend(validate_skills())
+    result.extend(validate_secret_state())
+    marker = "TO" + "DO"
+    for rel in tracked_files():
+        path = REPO_ROOT / rel
+        if path.is_file() and "__pycache__" not in path.parts and marker in path.read_text(encoding="utf-8", errors="ignore"):
+            result.errors.append("unfinished placeholders remain")
+            break
+    return result
 
 
-def validate_links() -> list[str]:
-    errors: list[str] = []
+def validate_generated_codex() -> CheckResult:
+    result = CheckResult()
+    try:
+        config = models_config()
+    except WorkstationError as exc:
+        result.errors.append(str(exc))
+        return result
+    model_check = validate_model_config(config, local=using_local_models())
+    if model_check.errors:
+        result.errors.extend(model_check.errors)
+        return result
+    if not all_tiers_configured(config):
+        result.warnings.append("Codex model profiles are not generated until model tiers are configured")
+        return result
+    for tier_name in TIERS:
+        try:
+            rendered = render_codex_profile(tier_name, config["tiers"][tier_name])
+            parsed = tomllib.loads(rendered)
+        except (WorkstationError, tomllib.TOMLDecodeError) as exc:
+            result.errors.append(f"invalid Codex TOML for {tier_name}: {exc}")
+            continue
+        if parsed.get("model_provider") == "openai" and "model_providers" in parsed:
+            result.errors.append(f"{tier_name} redefines built-in Codex provider openai")
+    return result
+
+
+def validate_links() -> CheckResult:
+    result = CheckResult()
     for root in (home() / ".agents" / "skills", home() / ".cline" / "skills"):
         if not root.exists():
             continue
         for path in root.iterdir():
-            if path.is_symlink() and not path.exists():
-                errors.append(f"broken symlink: {path}")
-    return errors
+            if path.is_symlink() and not path.exists() and is_managed_symlink(path):
+                result.errors.append(f"broken managed symlink: {path}")
+    return result
+
+
+def validate_installation_state() -> CheckResult:
+    result = CheckResult()
+    result.extend(validate_links())
+    models = models_config()
+    if all_tiers_configured(models):
+        for name in (*TIERS, *ROLE_TIERS.keys()):
+            path = home() / ".codex" / f"{name}.config.toml"
+            if path.exists() and is_managed_file(path):
+                try:
+                    tomllib.loads(path.read_text(encoding="utf-8"))
+                except tomllib.TOMLDecodeError as exc:
+                    result.errors.append(f"installed Codex profile is invalid TOML: {path}: {exc}")
+            else:
+                result.warnings.append(f"Codex profile not installed: {path}")
+    return result
+
+
+def model_tier_status_lines() -> list[str]:
+    try:
+        config = models_config()
+    except WorkstationError as exc:
+        return [f"Model tiers: invalid ({exc})"]
+    lines = ["Model tiers:"]
+    tiers = config.get("tiers", {})
+    for tier in TIERS:
+        entry = tiers.get(tier, {}) if isinstance(tiers, dict) else {}
+        status = "configured" if isinstance(entry, dict) and tier_is_configured(entry) else "UNCONFIGURED"
+        lines.append(f"{tier}: {status}")
+    return lines
 
 
 def install() -> list[str]:
-    errors = validate_repo()
-    if errors:
-        raise WorkstationError("validation failed before install:\n" + "\n".join(errors))
+    repo_result = validate_repo()
+    if repo_result.errors:
+        raise WorkstationError("validation failed before install:\n" + "\n".join(repo_result.errors))
     config = workstation_config()
     models = models_config()
     actions: list[str] = []
@@ -274,25 +477,32 @@ def install() -> list[str]:
         link_managed_dir(skill, home() / ".agents" / "skills" / skill.name, actions)
         link_managed_dir(skill, home() / ".cline" / "skills" / skill.name, actions)
 
+    launcher = home() / ".local" / "bin" / "ai-cline"
+    write_managed(launcher, f'#!/usr/bin/env sh\nexec "{REPO_ROOT / "scripts" / "workstation.py"}" cline "$@"\n', "scripts/workstation.py", actions)
+    launcher.chmod(0o755)
+
     tiers = models["tiers"]
-    for tier_name in TIERS:
-        write_managed(
-            home() / ".codex" / f"{tier_name}.config.toml",
-            render_codex_profile(tier_name, tiers[tier_name]),
-            f"config/{models_path().name}:{tier_name}",
-            actions,
-        )
-    for role, tier_name in config["roles"].items():
-        write_managed(
-            home() / ".codex" / f"{role}.config.toml",
-            render_codex_profile(tier_name, tiers[tier_name]) + f"# Logical role: {role}\n",
-            f"config/{models_path().name}:{role}",
-            actions,
-        )
+    if all_tiers_configured(models):
+        for tier_name in TIERS:
+            write_managed(
+                home() / ".codex" / f"{tier_name}.config.toml",
+                render_codex_profile(tier_name, tiers[tier_name]),
+                f"config/{models_path().name}:{tier_name}",
+                actions,
+            )
+        for role, tier_name in config["roles"].items():
+            write_managed(
+                home() / ".codex" / f"{role}.config.toml",
+                render_codex_profile(tier_name, tiers[tier_name]) + f"# Logical role: {role}\n",
+                f"config/{models_path().name}:{role}",
+                actions,
+            )
+    else:
+        actions.append("model tiers UNCONFIGURED; skipped Codex model profiles")
 
     cline_dir = home() / ".cline" / "ai-workstation"
     write_managed(cline_dir / "model-tiers.json", render_json(tiers), f"config/{models_path().name}", actions)
-    write_managed(cline_dir / "roles.json", render_json(config["roles"]), "config/workstation.yaml", actions)
+    write_managed(cline_dir / "roles.json", render_json(config["roles"]), "config/workstation.json", actions)
     return actions
 
 
@@ -302,32 +512,62 @@ def uninstall() -> list[str]:
         home() / ".codex" / "AGENTS.md",
         home() / ".cline" / "ai-workstation" / "model-tiers.json",
         home() / ".cline" / "ai-workstation" / "roles.json",
+        home() / ".local" / "bin" / "ai-cline",
     ]
     targets.extend(home() / ".codex" / f"{name}.config.toml" for name in (*TIERS, *ROLE_TIERS.keys()))
     targets.extend(home() / ".agents" / "skills" / skill.name for skill in skill_dirs())
     targets.extend(home() / ".cline" / "skills" / skill.name for skill in skill_dirs())
     for target in targets:
-        if not target.exists() and not target.is_symlink():
-            continue
-        if target.is_symlink() or is_managed_file(target) or (target.is_dir() and (target / ".ai-workstation-managed").exists()):
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-            actions.append(f"removed {target}")
-        else:
-            actions.append(f"left unmanaged {target}")
+        remove_owned(target, actions)
     return actions
 
 
 def status() -> list[str]:
-    paths = [
-        home() / ".codex" / "AGENTS.md",
-        home() / ".agents" / "skills",
-        home() / ".cline" / "skills",
-        home() / ".cline" / "ai-workstation" / "model-tiers.json",
+    skills_dir = home() / ".agents" / "skills"
+    skills_count = sum(1 for path in skills_dir.glob("*") if path.exists()) if skills_dir.exists() else 0
+    lines = [
+        f"Codex: {'installed' if (home() / '.codex' / 'AGENTS.md').exists() else 'missing'}",
+        f"Cline: {'installed' if (home() / '.cline' / 'ai-workstation').exists() else 'missing'}",
+        f"Skills: {skills_count} installed",
     ]
-    return [f"{path}: {'present' if path.exists() else 'missing'}" for path in paths]
+    lines.extend(model_tier_status_lines())
+    return lines
+
+
+def build_cline_command(tier_name: str, extra_args: list[str]) -> list[str]:
+    config = models_config()
+    tiers = config.get("tiers", {})
+    tier = tiers.get(tier_name) if isinstance(tiers, dict) else None
+    if not isinstance(tier, dict) or not tier_is_configured(tier):
+        raise WorkstationError(f"model tier {tier_name!r} is UNCONFIGURED; create config/models.local.json")
+    command = ["cline", "--provider", tier["provider"], "--model", tier["model"], "--thinking", tier["reasoning_effort"]]
+    command.extend(extra_args)
+    return command
+
+
+def run_cline(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="ai-cline")
+    parser.add_argument("--print-command", action="store_true")
+    parser.add_argument("tier", choices=TIERS)
+    parser.add_argument("cline_args", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    command = build_cline_command(args.tier, args.cline_args)
+    if args.print_command:
+        print(json.dumps(command))
+        return 0
+    completed = subprocess.run(command)
+    return completed.returncode
+
+
+def format_validation(result: CheckResult) -> list[str]:
+    lines = ["PASS repository" if not result.errors else "FAIL repository"]
+    if not result.errors:
+        lines.extend(["PASS skills", "PASS Codex adapter", "PASS Cline adapter", "PASS no tracked secrets detected"])
+    for warning in result.warnings:
+        lines.append(f"WARN {warning}")
+    for error in result.errors:
+        lines.append(f"ERROR {error}")
+    return lines
 
 
 def print_lines(lines: list[str]) -> None:
@@ -337,17 +577,18 @@ def print_lines(lines: list[str]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("install", "status", "validate", "update", "uninstall"))
-    args = parser.parse_args(argv)
+    parser.add_argument("command", choices=("install", "status", "validate", "update", "uninstall", "cline"))
+    args, rest = parser.parse_known_args(argv)
     try:
         if args.command == "install":
-            print("workstation configuration validated")
-            print_lines(install())
+            actions = install()
+            print("workstation repository validated")
+            print_lines(actions)
             print("global skills installed")
             print("Codex adapter configured")
             print("Cline adapter configured")
-            print("model configuration initialized")
-            print("no credentials committed")
+            print("model tiers configured" if all_tiers_configured(models_config()) else "model tiers UNCONFIGURED")
+            print("no tracked credentials detected")
         elif args.command == "update":
             print_lines(install())
             print("workstation updated")
@@ -357,11 +598,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "status":
             print_lines(status())
         elif args.command == "validate":
-            errors = validate_repo() + validate_links()
-            if errors:
-                print_lines(errors)
-                return 1
-            print("validation passed")
+            result = validate_repo()
+            result.extend(validate_generated_codex())
+            result.extend(validate_installation_state())
+            print_lines(format_validation(result))
+            return 1 if result.errors else 0
+        elif args.command == "cline":
+            return run_cline(rest)
     except WorkstationError as exc:
         print(str(exc), file=sys.stderr)
         return 1
