@@ -52,19 +52,22 @@ Codex reads only `tiers.<tier>.codex`. Cline reads only `tiers.<tier>.cline`. A 
 
 ### Tier Fields
 
-Both harness implementations use the same core fields:
+All harness implementations share the same core fields:
 
 - `configured`: boolean; `true` only when the implementation is runnable.
 - `provider`: provider identifier for the harness. Codex and Cline providers are independent and may differ within the same logical tier.
 - `model`: concrete model ID (non-empty when `configured` is `true`).
 - `reasoning_effort`: one of `minimal`, `low`, `medium`, `high`, `xhigh`.
+
+Codex implementations may additionally use:
+
 - `auth`: documentation field describing how the provider authenticates (for example `codex` for the built-in Codex OpenAI provider). It never stores a credential value.
+- `codex_provider_id`: non-reserved Codex provider ID for custom providers (must not be `openai`, `ollama`, or `lmstudio`).
+- `provider_name`: provider display name used for custom providers; defaults to `codex_provider_id`.
+- `base_url`: OpenAI-compatible API base URL for custom providers.
+- `env_key`: name of the environment variable holding a custom provider's credential. Secrets are referenced by environment variable name only.
 
-Codex custom providers additionally require:
-
-- `codex_provider_id`: a non-reserved provider ID (must not be `openai`, `ollama`, or `lmstudio`).
-- `base_url`: OpenAI-compatible API base URL.
-- `env_key`: the name of the environment variable holding the credential. Secrets are referenced by environment variable name only.
+Cline implementations use only the shared core fields.
 
 ### Fully Configured Example
 

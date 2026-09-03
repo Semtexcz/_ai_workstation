@@ -8,6 +8,18 @@ Core rule:
 
 `_ai_workstation` provides cross-project capabilities for Codex, Cline, shared global instructions, namespaced generic skills, logical model tiers, and small reusable utilities. It is intentionally not a project template.
 
+## Status
+
+Stable release: **v1.0.0** (repository version `1.0.0`, Git tag `v1.0.0`)
+
+`_ai_workstation` is the workstation-level foundation for AI-agent projects.
+Project semantics and orchestration belong in `_ai_work_template`.
+
+> **v1 stability principle:** v1.x should preserve the workstation/project
+> separation and the public logical tier interface (`frontier`, `strong`,
+> `cheap`). Breaking changes to configuration schema or project-facing
+> semantics require a major version.
+
 ## What Belongs Here
 
 - Agent harness user-level configuration.
