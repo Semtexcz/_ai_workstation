@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "tiers": {
+    "frontier": {
+      "provider": "openai",
+      "model": "frontier-class-model",
+      "reasoning_effort": "high",
+      "env_key": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1"
+    },
+    "strong": {
+      "provider": "openai",
+      "model": "mid-tier-model",
+      "reasoning_effort": "medium",
+      "env_key": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1"
+    },
+    "cheap": {
+      "provider": "openai",
+      "model": "inexpensive-model",
+      "reasoning_effort": "low",
+      "env_key": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1"
+    }
+  }
+}

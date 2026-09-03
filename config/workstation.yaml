@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "canonical": {
+    "skills": "skills/",
+    "global_agent_contract": "AGENTS.md",
+    "model_tiers_example": "config/models.example.yaml",
+    "local_model_tiers": "config/models.local.yaml"
+  },
+  "install": {
+    "codex_home": "~/.codex",
+    "codex_skills": "~/.agents/skills",
+    "cline_home": "~/.cline",
+    "cline_skills": "~/.cline/skills"
+  },
+  "roles": {
+    "planner": "frontier",
+    "analyst": "strong",
+    "worker": "cheap",
+    "reviewer": "strong"
+  }
+}

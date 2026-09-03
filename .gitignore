@@ -1,0 +1,12 @@
+.pytest_cache/
+__pycache__/
+*.pyc
+.coverage
+htmlcov/
+
+# Local, secret-bearing model/provider choices. Start from config/models.example.yaml.
+config/models.local.yaml
+
+# Runtime output
+*.log
+*.tmp
