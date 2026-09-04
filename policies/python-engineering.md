@@ -41,15 +41,3 @@ Retries must be bounded. Do not blindly retry deterministic validation failures,
 Use pydantic primarily at system boundaries: external data, API payloads, configuration, validation, serialization. Do not mechanically turn every internal object into a `BaseModel`; plain Python structures suffice when validation adds no benefit.
 
 New projects use pytest and ruff. Typical verification: `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest`. Bug fixes should normally include regression tests when practical. Do not build custom testing, linting, formatting, HTTP, or retry infrastructure when established tools fit.
-
-Short reference:
-
-- environment/dependencies/packages -> uv
-- reusable CLI -> package + `[project.scripts]` + pipx
-- CLI -> Typer
-- simple sync HTTP -> requests
-- async/advanced HTTP -> httpx
-- tests -> pytest
-- lint/format -> ruff
-- validation -> pydantic
-- settings -> pydantic-settings

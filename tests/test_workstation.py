@@ -222,6 +222,29 @@ class WorkstationTests(unittest.TestCase):
 
         self.run_with_home(scenario)
 
+    def test_validation_warns_and_preserves_unmanaged_global_instructions(self):
+        def scenario(home):
+            codex = home / ".codex" / "AGENTS.md"
+            shared = home / ".agents" / "AGENTS.md"
+            for path in (codex, shared):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# user-owned instructions\n", encoding="utf-8")
+            result = workstation.validate_installation_state()
+            for path in (codex, shared):
+                self.assertTrue(
+                    any(
+                        "global instructions exist but are not managed" in warning and str(path) in warning
+                        for warning in result.warnings
+                    ),
+                    f"expected unmanaged-global-instructions warning for {path}",
+                )
+                self.assertFalse(
+                    any("installed global instructions are stale" in error and str(path) in error for error in result.errors)
+                )
+                self.assertEqual(path.read_text(encoding="utf-8"), "# user-owned instructions\n")
+
+        self.run_with_home(scenario)
+
     def test_validation_detects_modified_managed_global_instructions(self):
         def scenario(home):
             workstation.install()

@@ -492,8 +492,11 @@ def validate_installation_state() -> CheckResult:
     result.extend(validate_links())
     expected_global_instructions = managed_header(composed_global_instruction_source()) + composed_global_instructions()
     for path in (home() / ".codex" / "AGENTS.md", home() / ".agents" / "AGENTS.md"):
-        if path.exists() and is_managed_file(path) and path.read_text(encoding="utf-8") != expected_global_instructions:
-            result.errors.append(f"installed global instructions are stale: {path}")
+        if path.exists():
+            if not is_managed_file(path):
+                result.warnings.append(f"global instructions exist but are not managed by _ai_workstation: {path}")
+            elif path.read_text(encoding="utf-8") != expected_global_instructions:
+                result.errors.append(f"installed global instructions are stale: {path}")
     models = models_config()
     if any_harness_tier_configured(models, "codex"):
         expected_profiles = [tier for tier in TIERS if harness_tier_is_configured(models, tier, "codex")]
