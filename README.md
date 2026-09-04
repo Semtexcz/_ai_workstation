@@ -8,6 +8,10 @@ Core rule:
 
 `_ai_workstation` provides cross-project capabilities for Codex, Cline, shared global instructions, namespaced generic skills, logical model tiers, and small reusable utilities. It is intentionally not a project template.
 
+## Python Engineering Defaults
+
+Workstation-level Python engineering defaults live in `policies/python-engineering.md`. Install/update deterministically compose the core global contract (`AGENTS.md`) with that concise policy and write the combined global instructions to both `~/.codex/AGENTS.md` and `~/.agents/AGENTS.md`. Healthy project-local conventions take precedence over these defaults. The global policy is intentionally concise to keep per-interaction agent context low.
+
 ## Status
 
 Stable release: **v1.0.0** (repository version `1.0.0`, Git tag `v1.0.0`)

@@ -187,17 +187,60 @@ class WorkstationTests(unittest.TestCase):
         with self.assertRaisesRegex(workstation.WorkstationError, "Cline implementation of tier 'cheap' is UNCONFIGURED"):
             workstation.build_cline_command("cheap", ["hello"])
 
-    def test_global_agents_installed_from_same_source(self):
+    def test_composed_global_instructions_contain_contract_and_python_policy(self):
+        composed = workstation.composed_global_instructions()
+        contract = (workstation.REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8").strip()
+        policy = (workstation.REPO_ROOT / "policies" / "python-engineering.md").read_text(encoding="utf-8").strip()
+        self.assertIn(contract, composed)
+        self.assertIn(policy, composed)
+        self.assertIn("prefer ecosystem composition over bespoke implementation", composed)
+
+    def test_global_agents_installed_from_composed_source_for_codex_and_cline(self):
         def scenario(home):
             workstation.install()
-            canonical = (workstation.REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+            expected = workstation.managed_header(workstation.composed_global_instruction_source()) + workstation.composed_global_instructions()
             codex = (home / ".codex" / "AGENTS.md").read_text(encoding="utf-8")
             shared = (home / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn(canonical, codex)
-            self.assertIn(canonical, shared)
+            self.assertEqual(codex, expected)
+            self.assertEqual(shared, expected)
             workstation.uninstall()
             self.assertFalse((home / ".codex" / "AGENTS.md").exists())
             self.assertFalse((home / ".agents" / "AGENTS.md").exists())
+
+        self.run_with_home(scenario)
+
+    def test_reinstall_keeps_managed_global_instructions_unchanged(self):
+        def scenario(home):
+            workstation.install()
+            codex = (home / ".codex" / "AGENTS.md").read_text(encoding="utf-8")
+            shared = (home / ".agents" / "AGENTS.md").read_text(encoding="utf-8")
+            actions = workstation.install()
+            self.assertEqual((home / ".codex" / "AGENTS.md").read_text(encoding="utf-8"), codex)
+            self.assertEqual((home / ".agents" / "AGENTS.md").read_text(encoding="utf-8"), shared)
+            self.assertIn(f"unchanged {home / '.codex' / 'AGENTS.md'}", actions)
+            self.assertIn(f"unchanged {home / '.agents' / 'AGENTS.md'}", actions)
+
+        self.run_with_home(scenario)
+
+    def test_validation_detects_modified_managed_global_instructions(self):
+        def scenario(home):
+            workstation.install()
+            codex = home / ".codex" / "AGENTS.md"
+            codex.write_text(codex.read_text(encoding="utf-8") + "# local drift\n", encoding="utf-8")
+            result = workstation.validate_installation_state()
+            self.assertTrue(
+                any("installed global instructions are stale" in error and str(codex) in error for error in result.errors)
+            )
+
+        self.run_with_home(scenario)
+
+    def test_validation_detects_stale_global_instructions_when_canonical_source_changes(self):
+        def scenario(home):
+            workstation.install()
+            original = workstation.composed_global_instructions()
+            with mock.patch.object(workstation, "composed_global_instructions", return_value=original + "# updated policy\n"):
+                result = workstation.validate_installation_state()
+            self.assertTrue(any("installed global instructions are stale" in error for error in result.errors))
 
         self.run_with_home(scenario)
 

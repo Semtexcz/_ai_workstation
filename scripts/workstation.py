@@ -28,6 +28,7 @@ ROLE_TIERS = {
 }
 REASONING = {"minimal", "low", "medium", "high", "xhigh"}
 BUILTIN_CODEX_PROVIDERS = {"openai", "ollama", "lmstudio"}
+GLOBAL_INSTRUCTION_SOURCES = ("AGENTS.md", "policies/python-engineering.md")
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"(?i)(api[_-]?key|access[_-]?token|secret)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{16,}"),
@@ -83,6 +84,19 @@ def models_path() -> Path:
 
 def models_config() -> dict[str, Any]:
     return load_json(models_path())
+
+
+def global_instruction_source_paths() -> list[Path]:
+    return [REPO_ROOT / rel for rel in GLOBAL_INSTRUCTION_SOURCES]
+
+
+def composed_global_instructions() -> str:
+    parts = [path.read_text(encoding="utf-8").strip() for path in global_instruction_source_paths()]
+    return "\n\n".join(parts) + "\n"
+
+
+def composed_global_instruction_source() -> str:
+    return " + ".join(GLOBAL_INSTRUCTION_SOURCES)
 
 
 def using_local_models() -> bool:
@@ -400,6 +414,7 @@ def validate_repo() -> CheckResult:
     required = [
         "README.md",
         "AGENTS.md",
+        "policies/python-engineering.md",
         "Makefile",
         ".gitignore",
         "config/models.example.json",
@@ -475,9 +490,9 @@ def validate_links() -> CheckResult:
 def validate_installation_state() -> CheckResult:
     result = CheckResult()
     result.extend(validate_links())
-    canonical_agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    expected_global_instructions = managed_header(composed_global_instruction_source()) + composed_global_instructions()
     for path in (home() / ".codex" / "AGENTS.md", home() / ".agents" / "AGENTS.md"):
-        if path.exists() and is_managed_file(path) and canonical_agents not in path.read_text(encoding="utf-8"):
+        if path.exists() and is_managed_file(path) and path.read_text(encoding="utf-8") != expected_global_instructions:
             result.errors.append(f"installed global instructions are stale: {path}")
     models = models_config()
     if any_harness_tier_configured(models, "codex"):
@@ -519,9 +534,10 @@ def install() -> list[str]:
     models = models_config()
     actions: list[str] = []
 
-    agent_contract = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    write_managed(home() / ".codex" / "AGENTS.md", agent_contract, "AGENTS.md", actions)
-    write_managed(home() / ".agents" / "AGENTS.md", agent_contract, "AGENTS.md", actions)
+    global_instructions = composed_global_instructions()
+    global_instruction_source = composed_global_instruction_source()
+    write_managed(home() / ".codex" / "AGENTS.md", global_instructions, global_instruction_source, actions)
+    write_managed(home() / ".agents" / "AGENTS.md", global_instructions, global_instruction_source, actions)
     for skill in skill_dirs():
         link_managed_dir(skill, home() / ".agents" / "skills" / skill.name, actions)
         link_managed_dir(skill, home() / ".cline" / "skills" / skill.name, actions)
